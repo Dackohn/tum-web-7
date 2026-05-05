@@ -1,1 +1,45 @@
-Server for lab 6
+Dev Queue — Python/FastAPI backend
+====================================
+
+REST API for the Dev Queue learning tracker (Lab 7).
+
+## Quick start
+
+    pip install -r requirements.txt
+    uvicorn main:app --reload --port 8000
+
+Swagger UI → http://localhost:8000/docs
+ReDoc      → http://localhost:8000/redoc
+
+## Auth flow
+
+1. POST /token  { "role": "ADMIN" }   → get a JWT (expires in 60 s)
+2. Click "Authorize" in Swagger and paste the token
+3. Call any endpoint
+
+## Roles
+
+| Role    | Permissions            |
+|---------|------------------------|
+| VISITOR | READ                   |
+| WRITER  | READ, WRITE            |
+| ADMIN   | READ, WRITE, DELETE    |
+
+## Endpoints
+
+### Auth
+  POST /token
+
+### Resources
+  GET    /resources?limit=20&offset=0&status=queued&category=course
+  GET    /resources/{id}
+  POST   /resources
+  PUT    /resources/{id}
+  DELETE /resources/{id}     (requires DELETE permission)
+
+### Folders (pipelines)
+  GET    /folders?limit=20&offset=0
+  GET    /folders/{id}
+  POST   /folders
+  PUT    /folders/{id}
+  DELETE /folders/{id}       (requires DELETE permission — cascades folderId to null)
