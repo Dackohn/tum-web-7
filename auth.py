@@ -1,4 +1,6 @@
+import hashlib
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
@@ -6,11 +8,11 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
-SECRET_KEY = "dev-queue-secret-change-in-production"
-ALGORITHM  = "HS256"
+SECRET_KEY      = "dev-queue-secret-change-in-production"
+ALGORITHM       = "HS256"
 EXPIRES_SECONDS = 60
+APP_VERSION     = "2.0.0"
 
-# True when running on Render — controls cookie Secure + SameSite flags
 IS_PROD = bool(os.getenv("RENDER"))
 
 Role = Literal["VISITOR", "WRITER", "ADMIN"]
@@ -21,17 +23,39 @@ ROLE_PERMISSIONS: dict[Role, list[str]] = {
     "ADMIN":   ["READ", "WRITE", "DELETE"],
 }
 
-# auto_error=False so missing header doesn't immediately 401 — we check cookie first
+# Use bcrypt in production — SHA-256 is fine for a dev/lab environment
+def _hash(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+USERS: dict[str, dict] = {
+    "alice":   {"password_hash": _hash("alice123"),   "role": "ADMIN"},
+    "bob":     {"password_hash": _hash("bob123"),     "role": "WRITER"},
+    "charlie": {"password_hash": _hash("charlie123"), "role": "VISITOR"},
+}
+
+
+def verify_credentials(username: str, password: str) -> Optional[dict]:
+    """Returns the user record if credentials are valid, otherwise None."""
+    user = USERS.get(username)
+    if not user:
+        return None
+    if not secrets.compare_digest(user["password_hash"], _hash(password)):
+        return None
+    return user
+
+
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def create_token(username: str, role: Role) -> str:
+    now = datetime.now(timezone.utc)
     payload = {
         "sub":         username,
         "role":        role,
         "permissions": ROLE_PERMISSIONS[role],
-        "exp":         datetime.now(timezone.utc) + timedelta(seconds=EXPIRES_SECONDS),
-        "iat":         datetime.now(timezone.utc),
+        "app_version": APP_VERSION,
+        "iat":         now,
+        "exp":         now + timedelta(seconds=EXPIRES_SECONDS),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -49,9 +73,8 @@ def decode_token(token: str) -> dict:
 
 def require(permission: str):
     """
-    Dependency that accepts either:
-    - httpOnly cookie 'token'  (browser app via POST /login)
-    - Authorization: Bearer … (Swagger UI / API clients via POST /token)
+    Accepts either an httpOnly cookie 'token' (POST /login)
+    or an Authorization: Bearer … header (POST /token / Swagger UI).
     """
     def dependency(
         request: Request,
