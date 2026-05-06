@@ -9,7 +9,7 @@ from jose import JWTError, jwt
 
 SECRET_KEY      = "dev-queue-secret-change-in-production"
 ALGORITHM       = "HS256"
-EXPIRES_SECONDS = 3600
+EXPIRES_SECONDS = 60
 APP_VERSION     = "2.0.0"
 
 IS_PROD = bool(os.getenv("RENDER"))
