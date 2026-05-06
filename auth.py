@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 
 SECRET_KEY = "dev-queue-secret-change-in-production"
 ALGORITHM  = "HS256"
-EXPIRES_SECONDS = 3600  # 1 hour
+EXPIRES_SECONDS = 60
 
 # True when running on Render — controls cookie Secure + SameSite flags
 IS_PROD = bool(os.getenv("RENDER"))
