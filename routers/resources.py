@@ -63,8 +63,8 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _get_or_404(username: str, resource_id: str) -> dict[str, Any]:
-    store = get_resources(username)
+def _get_or_404(workspace: str, resource_id: str) -> dict[str, Any]:
+    store = get_resources(workspace)
     if resource_id not in store:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found")
     return store[resource_id]
@@ -80,7 +80,7 @@ def list_resources(
     category:      Optional[str] = Query(None),
     payload:       dict         = Depends(require("READ")),
 ):
-    items = list(get_resources(payload["sub"]).values())
+    items = list(get_resources(payload["workspace"]).values())
     if status_filter:
         items = [r for r in items if r["status"] == status_filter]
     if category:
@@ -96,12 +96,12 @@ def list_resources(
 
 @router.get("/{resource_id}", response_model=ResourceOut, summary="Get a resource")
 def get_resource(resource_id: str, payload: dict = Depends(require("READ"))):
-    return _get_or_404(payload["sub"], resource_id)
+    return _get_or_404(payload["workspace"], resource_id)
 
 
 @router.post("", response_model=ResourceOut, status_code=status.HTTP_201_CREATED, summary="Create a resource")
 def create_resource(body: ResourceIn, payload: dict = Depends(require("WRITE"))):
-    username = payload["sub"]
+    workspace = payload["workspace"]
     ts = now_iso()
     resource = {
         "id":        str(uuid4()),
@@ -111,14 +111,14 @@ def create_resource(body: ResourceIn, payload: dict = Depends(require("WRITE")))
         "tags":   [t.strip().lower() for t in body.tags if t.strip()],
         "rating": body.rating if body.status == "done" else 0,
     }
-    save_resource(username, resource)
+    save_resource(workspace, resource)
     return resource
 
 
 @router.put("/{resource_id}", response_model=ResourceOut, summary="Update a resource")
 def update_resource(resource_id: str, body: ResourceIn, payload: dict = Depends(require("WRITE"))):
-    username = payload["sub"]
-    existing = _get_or_404(username, resource_id)
+    workspace = payload["workspace"]
+    existing = _get_or_404(workspace, resource_id)
     updated = {
         **existing,
         **body.model_dump(),
@@ -128,12 +128,12 @@ def update_resource(resource_id: str, body: ResourceIn, payload: dict = Depends(
         "tags":   [t.strip().lower() for t in body.tags if t.strip()],
         "rating": body.rating if body.status == "done" else 0,
     }
-    save_resource(username, updated)
+    save_resource(workspace, updated)
     return updated
 
 
 @router.delete("/{resource_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a resource")
 def delete_resource_route(resource_id: str, payload: dict = Depends(require("DELETE"))):
-    username = payload["sub"]
-    _get_or_404(username, resource_id)
-    delete_resource(username, resource_id)
+    workspace = payload["workspace"]
+    _get_or_404(workspace, resource_id)
+    delete_resource(workspace, resource_id)

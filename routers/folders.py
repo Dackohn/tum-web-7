@@ -43,15 +43,15 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _get_or_404(username: str, folder_id: str) -> dict[str, Any]:
-    store = get_folders(username)
+def _get_or_404(workspace: str, folder_id: str) -> dict[str, Any]:
+    store = get_folders(workspace)
     if folder_id not in store:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
     return store[folder_id]
 
 
-def _with_count(username: str, folder: dict) -> dict:
-    count = sum(1 for r in get_resources(username).values() if r.get("folderId") == folder["id"])
+def _with_count(workspace: str, folder: dict) -> dict:
+    count = sum(1 for r in get_resources(workspace).values() if r.get("folderId") == folder["id"])
     return {**folder, "resource_count": count}
 
 
@@ -63,38 +63,38 @@ def list_folders(
     offset:  int  = Query(0,  ge=0),
     payload: dict = Depends(require("READ")),
 ):
-    username = payload["sub"]
-    items = [_with_count(username, f) for f in get_folders(username).values()]
+    workspace = payload["workspace"]
+    items = [_with_count(workspace, f) for f in get_folders(workspace).values()]
     items.sort(key=lambda f: f["createdAt"], reverse=True)
     return PaginatedFolders(items=items[offset:offset+limit], total=len(items), limit=limit, offset=offset)
 
 
 @router.get("/{folder_id}", response_model=FolderOut, summary="Get a folder")
 def get_folder(folder_id: str, payload: dict = Depends(require("READ"))):
-    username = payload["sub"]
-    return _with_count(username, _get_or_404(username, folder_id))
+    workspace = payload["workspace"]
+    return _with_count(workspace, _get_or_404(workspace, folder_id))
 
 
 @router.post("", response_model=FolderOut, status_code=status.HTTP_201_CREATED, summary="Create a folder")
 def create_folder(body: FolderIn, payload: dict = Depends(require("WRITE"))):
-    username = payload["sub"]
+    workspace = payload["workspace"]
     folder = {
         "id":        str(uuid4()),
         "name":      body.name.strip(),
         "color":     body.color,
         "createdAt": now_iso(),
     }
-    save_folder(username, folder)
-    return _with_count(username, folder)
+    save_folder(workspace, folder)
+    return _with_count(workspace, folder)
 
 
 @router.put("/{folder_id}", response_model=FolderOut, summary="Update a folder")
 def update_folder(folder_id: str, body: FolderIn, payload: dict = Depends(require("WRITE"))):
-    username = payload["sub"]
-    existing = _get_or_404(username, folder_id)
+    workspace = payload["workspace"]
+    existing = _get_or_404(workspace, folder_id)
     updated = {**existing, "name": body.name.strip(), "color": body.color}
-    save_folder(username, updated)
-    return _with_count(username, updated)
+    save_folder(workspace, updated)
+    return _with_count(workspace, updated)
 
 
 @router.delete(
@@ -104,7 +104,7 @@ def update_folder(folder_id: str, body: FolderIn, payload: dict = Depends(requir
     description="Deletes the folder and sets folderId=null on all its resources.",
 )
 def delete_folder_route(folder_id: str, payload: dict = Depends(require("DELETE"))):
-    username = payload["sub"]
-    _get_or_404(username, folder_id)
-    nullify_folder_ref(username, folder_id)
-    delete_folder(username, folder_id)
+    workspace = payload["workspace"]
+    _get_or_404(workspace, folder_id)
+    nullify_folder_ref(workspace, folder_id)
+    delete_folder(workspace, folder_id)

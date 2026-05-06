@@ -2,7 +2,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import token, resources, folders
-from auth import seed_default_users
 from storage import init_db
 
 app = FastAPI(
@@ -31,7 +30,6 @@ app.include_router(folders.router, prefix="/folders", tags=["folders"])
 @app.on_event("startup")
 def startup():
     init_db()
-    seed_default_users()
 
 
 @app.get("/", include_in_schema=False)

@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from auth import (
     APP_VERSION,
@@ -14,12 +14,12 @@ from auth import (
     require,
     verify_credentials,
 )
-from storage import delete_user, get_user, list_users, save_user
+from storage import delete_user, get_user, list_workspace_members, save_user
 
 router = APIRouter(tags=["auth"])
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Cookie helpers ────────────────────────────────────────────────────────────
 
 def _set_cookie(response: Response, token: str):
     response.set_cookie(
@@ -43,29 +43,41 @@ def _clear_cookie(response: Response):
     )
 
 
-def _require_valid_user(username: str, password: str) -> dict:
-    user = verify_credentials(username, password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password",
-        )
-    return user
+# ── Schemas ───────────────────────────────────────────────────────────────────
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=40)
+    password: str = Field(..., min_length=4)
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"username": "alice", "password": "alice123"}]
+        }
+    }
 
 
-# ── Schemas ──────────────────────────────────────────────────────────────────
+class AddMemberRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=40)
+    password: str = Field(..., min_length=4)
+    role:     Role = "VISITOR"
 
-class TokenRequest(BaseModel):
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"username": "bob",     "password": "bob123",     "role": "WRITER"},
+                {"username": "charlie", "password": "charlie123", "role": "VISITOR"},
+            ]
+        }
+    }
+
+
+class CredentialsRequest(BaseModel):
     username: str
     password: str
 
     model_config = {
         "json_schema_extra": {
-            "examples": [
-                {"username": "alice",   "password": "alice123"},
-                {"username": "bob",     "password": "bob123"},
-                {"username": "charlie", "password": "charlie123"},
-            ]
+            "examples": [{"username": "alice", "password": "alice123"}]
         }
     }
 
@@ -75,29 +87,16 @@ class TokenResponse(BaseModel):
     token_type:   str = "bearer"
     username:     str
     role:         Role
+    workspace:    str
     permissions:  list[str]
     expires_in:   int
     app_version:  str
 
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {"username": "alice",   "password": "alice123"},
-                {"username": "bob",     "password": "bob123"},
-                {"username": "charlie", "password": "charlie123"},
-            ]
-        }
-    }
-
-
-class LoginResponse(BaseModel):
+class SessionResponse(BaseModel):
     username:    str
     role:        Role
+    workspace:   str
     permissions: list[str]
     expires_in:  int
     app_version: str
@@ -106,68 +105,102 @@ class LoginResponse(BaseModel):
 class MeResponse(BaseModel):
     username:    str
     role:        Role
+    workspace:   str
     permissions: list[str]
     app_version: str
     issued_at:   datetime
     expires_at:  datetime
 
 
-# ── Swagger / API-client token (Bearer) ──────────────────────────────────────
+class MemberOut(BaseModel):
+    username:    str
+    role:        Role
+    permissions: list[str]
+
+
+# ── Open registration (creates an ADMIN workspace) ───────────────────────────
+
+@router.post(
+    "/register",
+    response_model=SessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register a new admin workspace",
+    description=(
+        "Open endpoint — no auth required. Creates an **ADMIN** account and a personal "
+        "workspace. The workspace name equals the username. Returns a session cookie so "
+        "the user is logged in immediately after registering."
+    ),
+)
+def register(body: RegisterRequest, response: Response) -> SessionResponse:
+    if get_user(body.username):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Username '{body.username}' is already taken.")
+    save_user(body.username, hash_password(body.password), "ADMIN", workspace=body.username)
+    token = create_token(body.username, "ADMIN", workspace=body.username)
+    _set_cookie(response, token)
+    return SessionResponse(
+        username=body.username,
+        role="ADMIN",
+        workspace=body.username,
+        permissions=ROLE_PERMISSIONS["ADMIN"],
+        expires_in=EXPIRES_SECONDS,
+        app_version=APP_VERSION,
+    )
+
+
+# ── Login (cookie) ────────────────────────────────────────────────────────────
+
+@router.post(
+    "/login",
+    response_model=SessionResponse,
+    summary="Log in — sets an httpOnly session cookie",
+)
+def login(body: CredentialsRequest, response: Response) -> SessionResponse:
+    user = verify_credentials(body.username, body.password)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid username or password.")
+    token = create_token(body.username, user["role"], workspace=user["workspace"])
+    _set_cookie(response, token)
+    return SessionResponse(
+        username=body.username,
+        role=user["role"],
+        workspace=user["workspace"],
+        permissions=ROLE_PERMISSIONS[user["role"]],
+        expires_in=EXPIRES_SECONDS,
+        app_version=APP_VERSION,
+    )
+
+
+# ── Token (Bearer, for Swagger) ───────────────────────────────────────────────
 
 @router.post(
     "/token",
     response_model=TokenResponse,
-    summary="Get a Bearer JWT (for Swagger UI / API clients)",
+    summary="Get a Bearer JWT (Swagger UI / API clients)",
     description=(
-        "Returns a signed JWT. Click **Authorize** in Swagger and paste it as a Bearer token.\n\n"
-        "**Available users:**\n\n"
-        "| Username | Password | Role |\n"
-        "|----------|----------|------|\n"
-        "| alice | alice123 | ADMIN |\n"
-        "| bob | bob123 | WRITER |\n"
-        "| charlie | charlie123 | VISITOR |\n\n"
-        "| Role | Permissions |\n"
-        "|------|-------------|\n"
-        "| VISITOR | READ |\n"
-        "| WRITER  | READ, WRITE |\n"
-        "| ADMIN   | READ, WRITE, DELETE |"
+        "Returns a signed JWT in the response body for use with Swagger's **Authorize** button.\n\n"
+        "Register first via **POST /register**, then use those credentials here."
     ),
 )
-def get_token(body: TokenRequest) -> TokenResponse:
-    user = _require_valid_user(body.username, body.password)
-    role: Role = user["role"]
-    token = create_token(username=body.username, role=role)
+def get_token(body: CredentialsRequest) -> TokenResponse:
+    user = verify_credentials(body.username, body.password)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid username or password.")
+    token = create_token(body.username, user["role"], workspace=user["workspace"])
     return TokenResponse(
         access_token=token,
         username=body.username,
-        role=role,
-        permissions=ROLE_PERMISSIONS[role],
+        role=user["role"],
+        workspace=user["workspace"],
+        permissions=ROLE_PERMISSIONS[user["role"]],
         expires_in=EXPIRES_SECONDS,
         app_version=APP_VERSION,
     )
 
 
-# ── Browser session (httpOnly cookie) ────────────────────────────────────────
-
-@router.post(
-    "/login",
-    response_model=LoginResponse,
-    summary="Log in — sets an httpOnly session cookie",
-    description="Authenticates against the user registry. The role is determined server-side from the user record.",
-)
-def login(body: LoginRequest, response: Response) -> LoginResponse:
-    user = _require_valid_user(body.username, body.password)
-    role: Role = user["role"]
-    token = create_token(username=body.username, role=role)
-    _set_cookie(response, token)
-    return LoginResponse(
-        username=body.username,
-        role=role,
-        permissions=ROLE_PERMISSIONS[role],
-        expires_in=EXPIRES_SECONDS,
-        app_version=APP_VERSION,
-    )
-
+# ── Logout ────────────────────────────────────────────────────────────────────
 
 @router.post("/logout", summary="Clear the session cookie")
 def logout(response: Response):
@@ -175,19 +208,14 @@ def logout(response: Response):
     return {"message": "Logged out successfully"}
 
 
-@router.get(
-    "/me",
-    response_model=MeResponse,
-    summary="Current session info",
-    description=(
-        "Returns the identity and capabilities encoded in the active token.\n\n"
-        "`app_version` lets consumers detect tokens issued by an older API version."
-    ),
-)
+# ── Session info ──────────────────────────────────────────────────────────────
+
+@router.get("/me", response_model=MeResponse, summary="Current session info")
 def me(payload: dict = Depends(require("READ"))) -> MeResponse:
     return MeResponse(
         username=payload["sub"],
         role=payload["role"],
+        workspace=payload["workspace"],
         permissions=payload["permissions"],
         app_version=payload.get("app_version", "unknown"),
         issued_at=datetime.fromtimestamp(payload["iat"], tz=timezone.utc),
@@ -195,25 +223,7 @@ def me(payload: dict = Depends(require("READ"))) -> MeResponse:
     )
 
 
-# ── User management (ADMIN only) ─────────────────────────────────────────────
-
-class RegisterRequest(BaseModel):
-    username: str = ""
-    password: str = ""
-    role:     Role = "VISITOR"
-
-    model_config = {
-        "json_schema_extra": {
-            "examples": [{"username": "dave", "password": "dave123", "role": "WRITER"}]
-        }
-    }
-
-
-class UserOut(BaseModel):
-    username: str
-    role:     Role
-    permissions: list[str]
-
+# ── Workspace member management (ADMIN only) ──────────────────────────────────
 
 def _require_admin(payload: dict = Depends(require("DELETE"))) -> dict:
     if payload["role"] != "ADMIN":
@@ -222,49 +232,52 @@ def _require_admin(payload: dict = Depends(require("DELETE"))) -> dict:
 
 
 @router.post(
-    "/register",
-    response_model=UserOut,
+    "/members",
+    response_model=MemberOut,
     status_code=status.HTTP_201_CREATED,
-    summary="Register a new user (ADMIN only)",
-    description="Creates a new user account. Only users with the ADMIN role can call this.",
+    summary="Add a member to your workspace (ADMIN only)",
+    description="Adds a WRITER or VISITOR to the current admin's workspace. They share the admin's data.",
 )
-def register(body: RegisterRequest, payload: dict = Depends(_require_admin)) -> UserOut:
-    if not body.username.strip() or not body.password:
+def add_member(body: AddMemberRequest, payload: dict = Depends(_require_admin)) -> MemberOut:
+    if body.role == "ADMIN":
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail="Username and password are required")
+                            detail="Use POST /register to create admin accounts.")
     if get_user(body.username):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail=f"User '{body.username}' already exists")
-    save_user(body.username.strip(), hash_password(body.password), body.role)
-    return UserOut(
-        username=body.username.strip(),
+                            detail=f"Username '{body.username}' is already taken.")
+    workspace = payload["workspace"]
+    save_user(body.username, hash_password(body.password), body.role, workspace=workspace)
+    return MemberOut(
+        username=body.username,
         role=body.role,
         permissions=ROLE_PERMISSIONS[body.role],
     )
 
 
 @router.get(
-    "/users",
-    response_model=list[UserOut],
-    summary="List all users (ADMIN only)",
+    "/members",
+    response_model=list[MemberOut],
+    summary="List workspace members",
+    description="Returns all users (including the admin) who belong to the current workspace.",
 )
-def get_users(_: dict = Depends(_require_admin)) -> list[UserOut]:
+def get_members(payload: dict = Depends(require("READ"))) -> list[MemberOut]:
     return [
-        UserOut(username=u["username"], role=u["role"], permissions=ROLE_PERMISSIONS[u["role"]])
-        for u in list_users()
+        MemberOut(username=m["username"], role=m["role"], permissions=ROLE_PERMISSIONS[m["role"]])
+        for m in list_workspace_members(payload["workspace"])
     ]
 
 
 @router.delete(
-    "/users/{username}",
+    "/members/{username}",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete a user (ADMIN only)",
+    summary="Remove a member from your workspace (ADMIN only)",
 )
-def remove_user(username: str, payload: dict = Depends(_require_admin)):
+def remove_member(username: str, payload: dict = Depends(_require_admin)):
     if username == payload["sub"]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="Cannot delete your own account")
-    if not get_user(username):
+                            detail="Cannot remove yourself.")
+    member = get_user(username)
+    if not member or member["workspace"] != payload["workspace"]:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail=f"User '{username}' not found")
+                            detail=f"Member '{username}' not found in your workspace.")
     delete_user(username)
