@@ -10,9 +10,11 @@ from auth import (
     ROLE_PERMISSIONS,
     Role,
     create_token,
+    hash_password,
     require,
     verify_credentials,
 )
+from storage import delete_user, get_user, list_users, save_user
 
 router = APIRouter(tags=["auth"])
 
@@ -191,3 +193,78 @@ def me(payload: dict = Depends(require("READ"))) -> MeResponse:
         issued_at=datetime.fromtimestamp(payload["iat"], tz=timezone.utc),
         expires_at=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
     )
+
+
+# ── User management (ADMIN only) ─────────────────────────────────────────────
+
+class RegisterRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+    role:     Role = "VISITOR"
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"username": "dave", "password": "dave123", "role": "WRITER"}]
+        }
+    }
+
+
+class UserOut(BaseModel):
+    username: str
+    role:     Role
+    permissions: list[str]
+
+
+def _require_admin(payload: dict = Depends(require("DELETE"))) -> dict:
+    if payload["role"] != "ADMIN":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin only")
+    return payload
+
+
+@router.post(
+    "/register",
+    response_model=UserOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register a new user (ADMIN only)",
+    description="Creates a new user account. Only users with the ADMIN role can call this.",
+)
+def register(body: RegisterRequest, payload: dict = Depends(_require_admin)) -> UserOut:
+    if not body.username.strip() or not body.password:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="Username and password are required")
+    if get_user(body.username):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=f"User '{body.username}' already exists")
+    save_user(body.username.strip(), hash_password(body.password), body.role)
+    return UserOut(
+        username=body.username.strip(),
+        role=body.role,
+        permissions=ROLE_PERMISSIONS[body.role],
+    )
+
+
+@router.get(
+    "/users",
+    response_model=list[UserOut],
+    summary="List all users (ADMIN only)",
+)
+def get_users(_: dict = Depends(_require_admin)) -> list[UserOut]:
+    return [
+        UserOut(username=u["username"], role=u["role"], permissions=ROLE_PERMISSIONS[u["role"]])
+        for u in list_users()
+    ]
+
+
+@router.delete(
+    "/users/{username}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a user (ADMIN only)",
+)
+def remove_user(username: str, payload: dict = Depends(_require_admin)):
+    if username == payload["sub"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Cannot delete your own account")
+    if not get_user(username):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"User '{username}' not found")
+    delete_user(username)

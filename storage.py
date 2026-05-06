@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 DB_PATH = Path("devqueue.db")
 
@@ -14,6 +14,13 @@ def _conn() -> sqlite3.Connection:
 
 def init_db():
     with _conn() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                username      TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                role          TEXT NOT NULL
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS resources (
                 id       TEXT PRIMARY KEY,
@@ -30,6 +37,35 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_res_user ON resources(username)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_fol_user ON folders(username)")
+
+
+# ── Users ────────────────────────────────────────────────────────────────────
+
+def get_user(username: str) -> Optional[dict]:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT username, password_hash, role FROM users WHERE username = ?", (username,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_user(username: str, password_hash: str, role: str):
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+            (username, password_hash, role),
+        )
+
+
+def list_users() -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute("SELECT username, role FROM users ORDER BY username").fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_user(username: str):
+    with _conn() as conn:
+        conn.execute("DELETE FROM users WHERE username = ?", (username,))
 
 
 # ── Resources ───────────────────────────────────────────────────────────────

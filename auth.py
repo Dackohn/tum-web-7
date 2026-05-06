@@ -1,9 +1,8 @@
-import hashlib
 import os
-import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
+import bcrypt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
@@ -23,28 +22,40 @@ ROLE_PERMISSIONS: dict[Role, list[str]] = {
     "ADMIN":   ["READ", "WRITE", "DELETE"],
 }
 
-# Use bcrypt in production — SHA-256 is fine for a dev/lab environment
-def _hash(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+bearer_scheme = HTTPBearer(auto_error=False)
 
-USERS: dict[str, dict] = {
-    "alice":   {"password_hash": _hash("alice123"),   "role": "ADMIN"},
-    "bob":     {"password_hash": _hash("bob123"),     "role": "WRITER"},
-    "charlie": {"password_hash": _hash("charlie123"), "role": "VISITOR"},
-}
+# Default accounts seeded on first startup
+DEFAULT_USERS = [
+    ("alice",   "alice123",   "ADMIN"),
+    ("bob",     "bob123",     "WRITER"),
+    ("charlie", "charlie123", "VISITOR"),
+]
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hashed.encode())
+
+
+def seed_default_users():
+    """Insert default users if the users table is empty."""
+    from storage import get_user, save_user
+    for username, password, role in DEFAULT_USERS:
+        if not get_user(username):
+            save_user(username, hash_password(password), role)
 
 
 def verify_credentials(username: str, password: str) -> Optional[dict]:
-    """Returns the user record if credentials are valid, otherwise None."""
-    user = USERS.get(username)
+    from storage import get_user
+    user = get_user(username)
     if not user:
         return None
-    if not secrets.compare_digest(user["password_hash"], _hash(password)):
+    if not verify_password(password, user["password_hash"]):
         return None
     return user
-
-
-bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def create_token(username: str, role: Role) -> str:
@@ -86,7 +97,7 @@ def require(permission: str):
         if not token:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Not authenticated — use POST /login (cookie) or POST /token (Bearer)",
+                detail="Not authenticated",
                 headers={"WWW-Authenticate": "Bearer"},
             )
         payload = decode_token(token)
